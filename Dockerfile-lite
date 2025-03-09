@@ -1,31 +1,57 @@
-FROM alpine
+FROM ubuntu:22.04
 
 ARG APP_VERSION
 ARG TARGETARCH
 ARG APP_FAMILY
 
-ENV APP_NAME=dpanel
-ENV APP_ENV=lite
-ENV APP_VERSION=$APP_VERSION
-ENV APP_FAMILY=$APP_FAMILY
-ENV APP_SERVER_PORT=8080
+ENV APP_NAME=dpanel \
+    APP_ENV=lite \
+    APP_VERSION=$APP_VERSION \
+    APP_FAMILY=$APP_FAMILY \
+    APP_SERVER_PORT=8080 \
+    DOCKER_HOST=unix:///var/run/docker.sock \
+    STORAGE_LOCAL_PATH=/dpanel \
+    DB_DATABASE=${STORAGE_LOCAL_PATH}/dpanel.db \
+    TZ=Asia/Shanghai \
+    ACME_OVERRIDE_CONFIG_HOME=/dpanel/acme
 
-ENV DOCKER_HOST=unix:///var/run/docker.sock
-ENV STORAGE_LOCAL_PATH=/dpanel
-ENV DB_DATABASE=${STORAGE_LOCAL_PATH}/dpanel.db
-ENV TZ=Asia/Shanghai
-ENV ACME_OVERRIDE_CONFIG_HOME=/dpanel/acme
+# 设置时区
+RUN ln -fs /usr/share/zoneinfo/$TZ /etc/localtime && dpkg-reconfigure -f noninteractive tzdata
 
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apk/repositories && \
-  apk add --no-cache --update musl docker-compose tzdata git
+# 安装系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    tzdata \
+    git \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
 
+# 安装 docker-compose
+RUN curl -L "https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose
+
+# 安装 Python 依赖
+RUN pip3 install --no-cache-dir \
+    pypinyin \
+    PySocks \
+    telethon \
+    Pyyaml \
+    requests \
+    tqdm
+
+# 复制应用文件
 COPY ./runtime/dpanel${APP_FAMILY:+"-${APP_FAMILY}"}-musl-${TARGETARCH} /app/server/dpanel
 COPY ./runtime/config.yaml /app/server/config.yaml
 COPY ./docker/script /app/script
 
+# 设置工作目录和卷
 WORKDIR /app/server
 VOLUME [ "/dpanel" ]
 
+# 暴露端口
 EXPOSE 8080
 
+# 启动命令
 ENTRYPOINT [ "sh", "-c", "/app/server/dpanel server:start -f /app/server/config.yaml" ]
