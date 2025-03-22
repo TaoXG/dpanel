@@ -315,6 +315,7 @@ func (self Image) GetList(http *gin.Context) {
 	type ParamsValidate struct {
 		Tag   string `form:"tag" binding:"omitempty"`
 		Title string `json:"title"`
+		Use   int    `json:"use"`
 	}
 	params := ParamsValidate{}
 	if !self.Validate(http, &params) {
@@ -390,6 +391,18 @@ func (self Image) GetList(http *gin.Context) {
 		result = imageList
 	}
 
+	if params.Use > 0 {
+		result = function.PluckArrayWalk(result, func(i image.Summary) (image.Summary, bool) {
+			if params.Use == 1 && i.Containers > 0 {
+				return i, true
+			}
+			if params.Use == 2 && i.Containers == 0 {
+				return i, true
+			}
+			return image.Summary{}, false
+		})
+	}
+
 	titleList := make(map[string]string)
 	imageDbList, err := dao.Image.Find()
 	if err == nil {
@@ -406,23 +419,30 @@ func (self Image) GetList(http *gin.Context) {
 
 func (self Image) GetDetail(http *gin.Context) {
 	type ParamsValidate struct {
-		Md5 string `form:"id" binding:"required"`
+		Md5       string `json:"md5" binding:"required"`
+		ShowLayer bool   `json:"showLayer"`
 	}
 	params := ParamsValidate{}
 	if !self.Validate(http, &params) {
 		return
 	}
+	var err error
 
-	layer, err := docker.Sdk.Client.ImageHistory(docker.Sdk.Ctx, params.Md5)
-	if err != nil {
-		self.JsonResponseWithError(http, err, 500)
-		return
-	}
 	imageDetail, err := docker.Sdk.Client.ImageInspect(docker.Sdk.Ctx, params.Md5)
 	if err != nil {
 		self.JsonResponseWithError(http, err, 500)
 		return
 	}
+
+	layer := make([]image.HistoryResponseItem, 0)
+	if params.ShowLayer {
+		layer, err = docker.Sdk.Client.ImageHistory(docker.Sdk.Ctx, params.Md5)
+		if err != nil {
+			self.JsonResponseWithError(http, err, 500)
+			return
+		}
+	}
+
 	self.JsonResponseWithoutError(http, gin.H{
 		"layer": layer,
 		"info":  imageDetail,
@@ -495,7 +515,12 @@ func (self Image) Export(http *gin.Context) {
 		self.JsonResponseWithError(http, err, 500)
 		return
 	}
-	defer out.Close()
+	defer func() {
+		err = out.Close()
+		if err != nil {
+			slog.Debug("image export close", "error", err)
+		}
+	}()
 
 	_, err = io.Copy(http.Writer, out)
 	if err != nil {
@@ -558,6 +583,7 @@ func (self Image) CheckUpgrade(http *gin.Context) {
 	}
 	// 如果本地 digest 为空，则不检测
 	if function.IsEmptyArray(imageInfo.RepoDigests) {
+		_ = notice.Message{}.Info(".imageCheckUpgradeImageNotDigest")
 		self.JsonResponseWithoutError(http, gin.H{
 			"upgrade":     false,
 			"digest":      "",
@@ -604,4 +630,53 @@ func (self Image) CheckUpgrade(http *gin.Context) {
 		"digestLocal": imageInfo.RepoDigests,
 	})
 	return
+}
+
+func (self Image) GetRootfs(http *gin.Context) {
+	type ParamsValidate struct {
+		Md5  string `json:"md5" binding:"required"`
+		Path string `json:"path"`
+	}
+	params := ParamsValidate{}
+	if !self.Validate(http, &params) {
+		return
+	}
+
+	var pathInfoList []*docker.FileItemResult
+	var err error
+
+	cacheKey := fmt.Sprintf("image:rootfs:%s", params.Md5)
+	if item, ok := storage.Cache.Get(cacheKey); ok {
+		pathInfoList = item.([]*docker.FileItemResult)
+	} else {
+		pathInfoList, _, err = docker.Sdk.ImageInspectFileList(params.Md5)
+		if err != nil {
+			self.JsonResponseWithError(http, err, 500)
+			return
+		}
+		storage.Cache.Set(cacheKey, pathInfoList, time.Hour)
+	}
+	if params.Path == "" {
+		self.JsonResponseWithoutError(http, gin.H{
+			"list": function.PluckArrayWalk(pathInfoList, func(i *docker.FileItemResult) (string, bool) {
+				return i.Name, true
+			}),
+		})
+		return
+	} else {
+		subPathCount := strings.Count(params.Path, "/")
+		if params.Path != "/" {
+			subPathCount += 1
+		}
+		self.JsonResponseWithoutError(http, gin.H{
+			"info": function.PluckArrayWalk(pathInfoList, func(i *docker.FileItemResult) (*docker.FileItemResult, bool) {
+				if strings.HasPrefix(i.Name, params.Path) &&
+					strings.Count(i.Name, "/") == subPathCount &&
+					i.Name != params.Path {
+					return i, true
+				}
+				return i, false
+			}),
+		})
+	}
 }

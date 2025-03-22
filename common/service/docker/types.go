@@ -1,7 +1,10 @@
 package docker
 
 import (
-	"github.com/docker/go-connections/nat"
+	"archive/tar"
+	"fmt"
+	"io"
+	"os"
 	"strings"
 )
 
@@ -95,20 +98,16 @@ type PortItem struct {
 	Protocol string `json:"protocol"`
 }
 
-func (self *PortItem) Parse() (hostPort nat.PortBinding, destPort nat.Port) {
+func (self *PortItem) Parse() PortItem {
 	if hostIp, port, exists := strings.Cut(self.Host, ":"); exists {
-		hostPort.HostIP = hostIp
-		hostPort.HostPort = port
-	} else {
-		hostPort.HostIP = self.HostIp
-		hostPort.HostPort = self.Host
+		self.HostIp = hostIp
+		self.Host = port
 	}
 	if port, protocol, exists := strings.Cut(self.Dest, "/"); exists {
-		destPort, _ = nat.NewPort(protocol, port)
-	} else {
-		destPort, _ = nat.NewPort(self.Protocol, self.Dest)
+		self.Dest = port
+		self.Protocol = protocol
 	}
-	return hostPort, destPort
+	return *self
 }
 
 type LogDriverItem struct {
@@ -145,4 +144,33 @@ type NetworkCreateItem struct {
 type ImagePlatform struct {
 	Type string
 	Arch string
+}
+
+type ImportFile struct {
+	Reader            io.Reader
+	containerRootPath string
+	tar               *tar.Writer
+}
+
+func (self ImportFile) Test(path string) {
+	if file, err := os.Create(path); err == nil {
+		fmt.Printf("%v \n", file.Name())
+		defer file.Close()
+		_, _ = io.Copy(file, self.Reader)
+	}
+}
+
+type ImportFileOption func(self *ImportFile) (err error)
+
+type FileItemResult struct {
+	ShowName string `json:"showName"` // 展示名称，包含名称 + link 名称
+	Name     string `json:"name"`     // 完整的路径名称，不包含 linkname，eg: /dpanel/compose/compose1
+	LinkName string `json:"linkName"` // 链接目录或是文件
+	Size     string `json:"size"`
+	Mode     string `json:"mode"`
+	IsDir    bool   `json:"isDir"`
+	ModTime  string `json:"modTime"`
+	Change   int    `json:"change"`
+	Group    string `json:"group"`
+	Owner    string `json:"owner"`
 }
